@@ -1,0 +1,162 @@
+---
+title: "Hotspot identification using a relative frequency distribution approach"
+author: "PJ Bouchet"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+	message = TRUE,
+	warning = TRUE,
+	collapse = TRUE,
+	comment = "#>"
+)
+```
+
+This small vignette illustrates the use of custom functions for identifying 'hotspots' in a spatial variable of interest. 
+
+The code is based on the frequency distribution approach proposed by Bartolino et al. (2011)^[Bartolino V, Maiorano L, Colloca F. 2011. A frequency distribution approach to hotspot identification. Population Ecology, 53(2): 351-359] and applied in Bouchet et al. (2017).^[Bouchet et al. 2017. Continental-scale hotspots of pelagic fish abundance inferred from commercial catch records. Global Ecology and Biogeography, 26(10): 1098-1111.]
+
+The required libraries and options are specified below.
+
+```{r message=FALSE, warning=FALSE, tidy=TRUE}
+library(fANCOVA)
+library(raster)
+library(virtualspecies)
+library(tidyverse)
+
+options(tibble.width = Inf) # All tibble columns shown
+options(pillar.neg = FALSE) # No colouring negative numbers
+options(pillar.subtle = TRUE)
+options(pillar.sigfig = 4)
+```
+
+Below is a simple simulated example using WorldClim data.
+WorldClim (www.worldclim.org) freely provides gridded climate data (temperature and precipitations) for the entire World. Here, we generate a virtual tropical species (ie. living in hot and humid environments), whose response to two environmental variables, the annual mean temperature bio1 and annual mean precipitation bio2, is pre-determined. 
+Code adapted from: http://borisleroy.com/files/virtualspecies-tutorial.html#input-data 
+
+```{r tidy=TRUE, fig.width=7, fig.height=5}
+# Downloads WorldClim data
+worldclim <- getData("worldclim", var = "bio", res = 10)
+
+# Gaussian functions of bio1 and bio12
+my.parameters <- formatFunctions(bio1 = c(fun = 'dnorm', mean = 250, sd = 50),
+                                 bio12 = c(fun = 'dnorm', mean = 4000, sd = 2000))
+
+# Generates simulated species distributions
+simsp <- generateSpFromFun(raster.stack = worldclim[[c("bio1", "bio12")]],
+                                      parameters = my.parameters,
+                                      plot = TRUE)
+
+# For the sake of the example only extracts a small portion of that distribution
+# eg from South America
+simdist <- raster::crop(x = simsp$suitab.raster,
+                        y = as(extent(c(-51,-45, -15,-5)), "SpatialPolygons"))
+
+plot(simdist)
+# Turns the raster into a data.frame object and manipulates values
+dat <- raster::as.data.frame(simdist, xy=T)
+dat <- dat %>% purrr::set_names(., c("longitude", "latitude", "z"))
+dat$z = round(dat$z *100,0)
+
+```
+
+Next we define custom functions to calculate the cumulative relative frequency distribution function CRFD (as described in the Bartolino paper)
+
+```{r echo=TRUE, tidy=TRUE}
+no.cumul<-function(data, value){
+  return(length(data[data<value]))}
+
+bartolino<-function(df, var.name){
+  
+  # Converts var.name to a string
+  var.name <- deparse(substitute(var.name))
+  
+  # Calculates x-axis [x = z / zm] and y-axis [y = M(x)/n] values 
+  df <- df %>% 
+    mutate_(x = paste(var.name, "/max(", var.name, ")"))
+  
+  allx <- df %>% pull(x)
+    
+  df <- df %>% rowwise %>%
+    mutate(y=no.cumul(allx, x)/nrow(df)) %>%
+    ungroup()
+
+  return(df)} # End function
+```
+
+These functions can be applied to the data.
+
+```{r echo=TRUE, tidy=TRUE, warning=FALSE}
+dat.bart <- bartolino(df = dat, var.name = z)
+```
+
+Additional functions are needed to determine the highest x-value corresponding to a 45 degree tangent to the predicted loess curve.
+
+```{r tidy=TRUE}
+find.bartolino<-function(loess.predictions){
+  
+  for (p in 3:(length(loess.predictions)-1)){
+    slope.curve<-(loess.predictions[p+1]-loess.predictions[p-1])/(loess.x[p+1]-loess.x[p-1])
+    if(slope.curve>=1) {
+      barto.x<-loess.x[p]
+      break
+    }}
+  return(barto.x)
+} # End function
+
+find.bartolino.y<-function(loess.predictions){
+  
+  for (p in 3:(length(loess.predictions)-1)){
+    slope.curve<-(loess.predictions[p+1]-loess.predictions[p-1])/(loess.x[p+1]-loess.x[p-1])
+    if(slope.curve>=1) {
+      barto.y<-loess.predictions[p]
+      break
+    }}
+  return(barto.y)
+} # End function
+```
+
+A LOESS model can be fitted to the CRFD points, and the x-value cutoff identified from the resulting predictions.
+
+```{r tidy=TRUE, warning=FALSE, fig.width=7, fig.height=5}
+# LOESS smoothing - with automated span selection based on AICc or GCV
+# The degree of smoothing can also be selected manually using user.span
+  
+  loess.x<-rev(seq(0,1,0.001))
+  loessmod.n<- fANCOVA::loess.as(dat.bart$x, 
+                        dat.bart$y, 
+                        degree = 0, 
+                        criterion = c("aicc", "gcv")[1],
+                        user.span = NULL, 
+                        plot = T)
+  
+  lo.preds.n<-predict(loessmod.n,loess.x)
+  
+  xbest<-find.bartolino(lo.preds.n)
+  ybest<-find.bartolino.y(lo.preds.n)
+  abline(v=xbest, col="orange", lty=2)
+```
+
+Finally, hotspots are simply those sites with an x value higher than the threshold.
+
+```{r warning=FALSE, fig.width=7, fig.height=5, tidy=TRUE}
+dat.hot <- dat.bart %>% 
+  filter(x>=xbest)
+
+# Converts to SpatialPoints df
+hot.pts <- dat.hot %>% 
+  dplyr::select(longitude, latitude, z) %>% 
+  SpatialPointsDataFrame(coords = cbind(.$longitude, .$latitude), data = .)
+
+# Visualisation
+plot(simdist)
+plot(hot.pts, add=T)
+
+```
+
