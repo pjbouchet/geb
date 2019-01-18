@@ -1,2 +1,2 @@
-Code for identifying hotspots using a cumulative relative frequency distribution (CRFD) approach
-As per Bartolino et al. 2011. Pop. Ecol.
+Code for identifying hotspots using a cumulative relative frequency distribution (CRFD) approach.  
+As per Bartolino et al. (2011). Pop. Ecol. https://link.springer.com/article/10.1007/s10144-010-0229-2
